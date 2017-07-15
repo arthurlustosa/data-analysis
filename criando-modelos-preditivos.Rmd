@@ -1,0 +1,322 @@
+---
+title: "Criando Modelos de Predição"
+autor: "Arthur Lustosa"
+output: 
+  html_document:
+   toc: true
+   toc_float: true
+   theme: paper
+---
+
+Nessa análise construíremos modelos preditivos de regressão para predição do CRA (Coeficiente de Rendimento Acadêmico) baseado nas notas obtidas nas disciplinas do primeiro e do segundo período dos alunos de Ciência da Computação - UFCG.
+
+Bibliotecas utilizadas
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(reshape2)
+library(ggplot2)
+library(corrplot)
+library(caret)
+library(leaps)
+library(h2o)
+```
+
+
+<li>**Lendo os dados**</li>
+Recebemos os dataset já separados em treino e test.
+```{r}
+graduados.train <- read.csv("dados/graduados_treino.csv")
+graduados.validation <- read.csv("dados/graduados_teste.csv")
+graduados.test <- read.csv("dados/test.csv")
+```
+
+##1 - Conhecendo os dados
+
+Um preprocessamento nos dados foi necessário, antes de iniciarmos nossa análise. Foi preciso calcular o CRA dos alunos e selecionar apenas as disciplinas referentes ao primeiro e segundo perído do curso. Após o processamento nossos dados ficaram no seguinte formato:
+
+<ol>
+<li>-matricula</li>
+<li>-ano_evasao</li>
+<li>-periodo_evasao</li>
+<li>-cod_disciplina</li>
+<li>-disciplina</li>
+<li>-creditos</li>
+<li>-media</li>
+</ol>
+
+```{r warning=F, message=F, echo=F}
+
+#funcao que executa script para processamento dos dados
+processing_data <- function(data){
+  
+  colnames(data) <- c("matricula", "ano_evasao", "periodo_evasao", "cod_disciplina", "disciplina", "creditos", "media")
+  
+  #ordenando os dados pela matrícula
+  data <- data %>%
+  arrange(matricula)
+  
+  #filtrando dados e removendo os NaNs
+  data.clean <- data %>%
+  filter(!is.na(media))
+  
+  #calculando CRA dos alunos e salvando numa coluna
+  data.cra <- data.clean %>%
+  group_by(matricula) %>%
+  mutate(cra.contrb = media*creditos) %>%
+  summarise(cra = sum(cra.contrb)/sum(creditos))
+  
+  #utilizando a função dcast para deixar o dataset na forma ideal para a análise
+  data.model.input <- data.clean %>%
+  group_by(matricula, disciplina) %>%
+  filter(media == max(media))%>%
+  ungroup() %>%
+  select(matricula, disciplina, media) %>%
+  mutate(disciplina = as.factor(gsub(" ", ".", disciplina))) %>%
+  dcast(matricula ~disciplina, mean) %>%
+  merge(data.cra)
+  
+  #selecionando cra e disciplinas do primeiro e segundo período
+  data.result <- data.model.input %>%
+    select(matricula, Laboratório.de.Programação.I, Programação.I, Introdução.à.Computação, Cálculo.Diferencial.e.Integral.I, Álgebra.Vetorial.e.Geometria.Analítica, Leitura.e.Produção.de.Textos, Cálculo.Diferencial.e.Integral.II, Matemática.Discreta, Programação.II, Teoria.dos.Grafos, Fundamentos.de.Física.Clássica, Laboratório.de.Programação.II, cra)
+  
+  #renomeando colunas
+  colnames(data.result) <- c("matricula", "C1", "Vetorial", "LPT", "P1", "IC", "LP1","C2", "Discreta", "P2", "Grafos", "Fisica", "LP2", "CRA")
+  
+  return(data.result)
+  
+}
+
+validation <- processing_data(graduados.validation)
+train <- processing_data(graduados.train)
+
+
+#substituindo NaN pelo CRA
+for (i in 1:nrow(train)){
+  for (j in 1:ncol(train)){
+    if(is.na(train[i,j])){
+      train[i,j] = train$CRA[i]
+
+    }
+    if(is.na(validation[i,j])){
+      validation[i, j] = validation$CRA[i]
+    }
+  }
+}
+
+validation <- na.omit(validation)
+
+
+write.csv(train, "dados/dados_treino.csv", row.names = F)
+write.csv(validation, "dados/dados_validacao.csv", row.names = F)
+
+```
+
+
+Após processarmos os dados tivemos que fazer mais algumas alterações para os dados ficassem no formato necessário para criar os modelos. Os atributos dos dados ficaram sendo as disciplinas e a última coluna como sendo a variável alvo. As linhas são as notas dos alunos, a matrícula foi removida devido a confidencialidade dos dados.
+
+```{r}
+head(train)
+```
+Antes de iniciarmos nossa análise vamos observar a correlação das variáveis em relação a variável alvo.
+
+```{r fig.width=12, fig.height=10, warning=F, message=F}
+#calculando matriz de correlação
+correlationMatrix <- cor(train %>% select(-matricula))
+
+#utlizamos a bibliota corrplot para montar o gráfico com as correlações
+corrplot(correlationMatrix, method="circle", type="lower", order="hclust", addCoef.col = "black")
+```
+Vemos que a disciplina de cálculo 2, LPT e matemática discreta são as disciplinas que possuem correlação mais alta com o CRA do aluno. 
+
+Vamos agora para nossa análise preditiva, para isso vamos seguir os passos descritos abaixo:
+
+<ol>
+<li>Criando Modelos</li> 
+<li>Comparar os resultados de cada modelo</li> 
+<li>Verificar a importância das veriáveis</li> 
+<li>Realizar predição</li> 
+<li>Utilizar o melhor modelo para prever o meu próprio desempenho</li> 
+</ol>
+
+##2 - Criando Modelos
+
+Para a criação do modelo utilizei o pacote h2o, por se tratar de um open-source software para big-data analysis. O h2o é bastante rápido e flexível, podendo assim ser possível carregar uma grande quantidade de dados. Faz parte de uma comunidade que vem crescendo cada dia mais.
+
+Inicialmente iremos criar 3 modelos básicos onde cada modelo será de um algoritmo diferente. Iremos utilizar:
+
+<ol>
+<li>GBM (Gradient Boosting Algorithm)</li>
+<li>Random Forest/</li>
+<li>Deep Learning</li>
+</ol>
+
+O nosso objetivo nessa etapa é encontrar o melhor modelo para o nosso problema sem utilizar nenhum tipo de pre processamento, transformação, criação de features. Depois de encontrado o melhor modelo iremos aplicar todo o pre processamento já feito, transformação de variáveis, etc. Com o objetivo final de deixar o modelo ainda melhor.
+
+Vamos inicialmente trabalhar com os modelos GBM, Random Florest e Deep Learning. O ideal seria inicialmente rodar todos os modelos com um grande número de árvores, grande profundidade e uma taxa de aprendizado pequena por interação.
+
+```{r, message=F, warning=F, results='hide'}
+conn <- h2o.init(nthreads = -1)
+
+dados.treino <- h2o.importFile("dados/dados_treino.csv")
+dados.validacao <- h2o.importFile("dados/dados_validacao.csv")
+dados.teste <- h2o.importFile("dados/test.csv")
+```
+
+
+```{r, message=F, warning=F, results='hide'}
+# Coluna que se deseja prever
+myY <- "CRA"
+ 
+# Coluna que deve ser ignorada pelo modelo
+ignored_columns <- c("CRA", "matricula")
+ 
+myX <- setdiff(setdiff(names(dados.treino), myY), ignored_columns)
+ 
+# GBM
+gbm <- h2o.gbm(x = myX, build_tree_one_node = T,
+            y = myY,
+            training_frame    = dados.treino,
+            validation_frame  = dados.validacao,
+            ntrees            = 50,
+            max_depth         = 6,
+            learn_rate        = 0.1)
+
+# DRF
+drf <- h2o.randomForest(x = myX,
+                     y = myY,
+                     training_frame    = dados.treino,
+                      validation_frame  = dados.validacao,
+                     ntrees            = 50,
+                     max_depth         = 30)
+
+
+# Deep Learning
+dlearning.model <- h2o.deeplearning(
+            x = myX,
+            y = myY,
+            training_frame = dados.treino,
+            validation_frame  = dados.validacao,
+             epoch = 60,
+             hidden = c(100,100),
+             activation = "Rectifier",
+             seed = 1122
+             )
+
+```
+
+##3 - Comparando os modelos
+
+```{r, message=F, warning=F, results='hide'}
+# Score de cada modelo
+trainr2.gbm <- h2o.r2(gbm)
+testr2.gbm  <- h2o.r2(gbm, valid = TRUE)
+ 
+trainr2.drf <- h2o.r2(drf)
+testr2.drf  <- h2o.r2(drf, valid = TRUE)
+ 
+trainr2.dlearning.model <- h2o.r2(dlearning.model)
+testr2.dlearning.model  <- h2o.r2(dlearning.model, valid = TRUE)
+ 
+toPlot <- data.frame(Rsquared = c(trainr2.gbm, testr2.gbm, trainr2.drf, testr2.drf, trainr2.dlearning.model, testr2.dlearning.model),
+                        tipo = c("treino", "validacao", "treino", "validacao", "treino", "validacao"),
+                        modelo = c("GBM","GBM","RF", "RF","DL", "DL"))
+
+```
+Para verificar qual dos 3 modelos é o melhor, utilizamos a métrica Rsquared, onde o valor do Rsquared (entre 0 e 1) é o percentual de variância explicada pelo o modelo. Na regressão, o Rsquared é uma medida estatística de quão bem a linha de regressão aproxima os pontos de dados reais. Um Rsquared igual a 1 indica que a linha de regressão encaixa perfeitamente os dados. Quanto maior foi o Rsquared melhor é o modelo.
+
+```{r, message=F, warning=F}
+ggplot(data=toPlot, aes(x = modelo, y = Rsquared, fill = tipo)) +
+ geom_bar(stat="identity", position=position_dodge()) +
+ theme_classic() +
+ labs(title = "Comparando os modelos") +
+ theme(axis.ticks = element_blank())
+```
+
+É possível notar que o DL (Deep Learning Model) teve um melhor resultado do que os outros modelos, obtendo assim um Rsquared maior. Por esse motivo optamos por escolher o modelo DL para realizar a predição. Porém antes de realizar a predição vamos tentar melhorar ainda mais esse modelo utilizando várias estratégias.
+
+####Compotamento dos modelos
+
+<li>**Random Forest**</li>
+<center>
+![](/home/arthur/workspace/projetos/data-analysis/imagens/RF_number-of-trees.png)
+</center>
+Podemos observar o gráfico de evolução do treino (linha azul) e da validação (linha laranja) que com 10 árvores nosso modelo Random Forest começar a ter uma certa estabilidade, e depois da árvore de número 45  o modelo vai se tornando cada vez mais estável.
+<li>**GBM**</li>
+<center>
+![](/home/arthur/workspace/projetos/data-analysis/imagens/gbm_number-of-trees.png)
+</center>
+O Gradient Boosting Algorithm necessita de menos árvores para chegar ao ponto de estabilidade, a partir da árvore 8 o modelo começa a se estabilizar. 
+<li>**Deep Learning Model**</li>
+<center>
+![](/home/arthur/workspace/projetos/data-analysis/imagens/epochs.png)
+</center>
+
+Ao analisar o gráfico de evolução do treino (linha azul) e da validação (linha laranja), percebemos que entre as épocas 45 e 50 o modelo começa ter um comportamento inverso, a validação começa a ter um melhor resultado que o treino, concluímos que a partir da época 47 o modelo apresenta uma taxa de aprendizagem melhor.
+
+##4 - Importância das Variáveis
+
+<li>**Random Forest**</li>
+<center>
+![](/home/arthur/workspace/projetos/data-analysis/imagens/RF_variable-importance.png)
+</center>
+
+<li>**GBM**</li>
+<center>
+![](/home/arthur/workspace/projetos/data-analysis/imagens/GBM_importance-variable.png)
+</center>
+
+
+<li>**Deep Learning Model**</li>
+<center>
+![](/home/arthur/workspace/projetos/data-analysis/imagens/DL_variable-importance.png)
+</center>
+Como o DL é uma rede neural a capacidade de extrair características fortes para o modelo fica limitada, com o pacote H2O é possível extrair a importância das variáveis do modelo. Nosso trashold para selecionar as variáveis mais importantes para o modelo, foi seu valor na escala de importância que os modelos nos fornecem, o valor foi > 0.9. Portanto, comparando os resultados dos  Random Forest, GBM e DL as variáveis mais importantes para o modelo são: C2, LPT, IC, P1 e C1. 
+
+##5 - Realizando predição
+
+Depois de escolhido o modelo vamos prepara os dados do teste. 
+
+```{r, message=F, warning=F, results='hide'}
+# Realizando a predição
+predicao = h2o.predict(object = dlearning.model, newdata = dados.teste)
+
+h2o.exportFile(predicao, path = "predicao2.csv", force = TRUE)
+
+# Editando o arquivo de predição
+predicao2 <- read.csv("dados/predicao2.csv")
+predicao2$predict <- as.character(predicao2$predict)
+predicao2$predict <- gsub(",", ".", predicao2$predict)
+predicao2$predict <- as.numeric(predicao2$predict)
+
+write.csv2(predicao2$predict, file = 'dados/predicao.csv', row.names = FALSE)
+
+hist(predicao2$predict, main="Histograma Predição CRA", 
+     xlab= "CRA")
+
+hist(train$CRA, main="Histograma Treino CRA", 
+     xlab= "CRA")
+
+```
+Após realizar a predição com os dados de teste, podemos comparar nossos resultados observados os histogramas plotados com os valores da nossa predição e com os dos dados de teste. O comportamento dos gráficos se comparam a uma distribuição normal, o que é um bom sinal para o nosso modelo.
+
+##6 - Prevendo Desempenho Próprio
+
+```{r, message=F, warning=F, results='hide'}
+notas = data.frame(LPT = 7.9, P1 = 9.3, IC = 6.6, Vetorial = 5.6, Discreta = 7.6, P2 = 8.2, LP2 = 8.2, Grafos = 8.3, C1 = 7.0, LP1 = 9.3, C2 = 5.0, Fisica = 7.5)
+
+write.csv(notas,"dados/minhas_notas.csv", row.names = F)
+# Editando o arquivo de predição
+minhas.notas <- h2o.importFile("dados/minhas_notas.csv")
+
+predict(drf, minhas.notas)
+```
+
+Passamos como parâmetro para a predição um vetor com as minhas notas do primeiro e do segundo período, e o resultado foi bastante semelhante com o real. Hoje meu CRA é 7.25
+
+##7 - Conclusões
+
+<p>Após todo o estudo inicial sobre as melhores técnicas para encontrar padrões em dados conseguimos formular um background teórico para propormos descobrir qual melhor modelo para realizar a predição do desempenho do aluno. Apresentamos três modelos de regressão, dois utilizando árvores de decisão e um redes neurais artificiais, concluímos que tanto os modelos utilizaram praticamente as mesmas variáveis para realizar a predição, porém a rede neural utilizada se mostrou mais adequada para a solução desse problema.</p>
+
+<p>Dentre os três modelos o escolhido foi o Deep Learning (que utiliza uma rede neural), que obteve o maior R², ou seja, o que explica a variância do modelo. </p>
+
+<p>Concluindo nosso relatório, vários fatores externos podem influenciar o desempenho acadêmico de um aluno no decorrer de sua graduação em Ciência da Computação, nosso modelo apontou que se ele se dedicar mais nas disciplinas C2, LPT, IC, P1 e C1, essa dedicação poderá ocasionar um excelente resultado no final do seu curso.</p>
