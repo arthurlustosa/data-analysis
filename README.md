@@ -9,9 +9,12 @@ Para a criação dos modelos utilizei o pacote h2o, por se tratar de um open-sou
 
 Inicialmente iremos criar 3 modelos onde cada modelo será de um algoritmo diferente. Iremos utilizar:
 
-GBM (Gradient Boosting Algorithm)
-Random Forest
-Deep Learning
+<ol>
+<li>GBM (Gradient Boosting Algorithm)</li>
+<li>Random Forest/</li>
+<li>Deep Learning</li>
+</ol>
+
 
 ### Solução
 A solução para este problema pode ser encontrada [aqui](http://rpubs.com/arthurlustosa/291521)
