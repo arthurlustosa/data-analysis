@@ -280,7 +280,7 @@ Depois de escolhido o modelo vamos prepara os dados do teste.
 # Realizando a predição
 predicao = h2o.predict(object = dlearning.model, newdata = dados.teste)
 
-h2o.exportFile(predicao, path = "predicao2.csv", force = TRUE)
+h2o.exportFile(predicao, path = "dados/predicao2.csv", force = TRUE)
 
 # Editando o arquivo de predição
 predicao2 <- read.csv("dados/predicao2.csv")
